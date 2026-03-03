@@ -189,6 +189,8 @@ class Delta:
         self._do_iterable_opcodes()
         self._do_iterable_item_removed()
         self._do_iterable_item_added()
+        # self._do_values_changed()
+        # self._do_type_changes()
         self._do_ignore_order()
         self._do_dictionary_item_added()
         self._do_dictionary_item_removed()
