@@ -180,17 +180,42 @@ class Delta:
         else:
             self.root = deepcopy(other)
         self._do_pre_process()
-        self._do_values_changed()
-        self._do_set_item_added()
-        self._do_set_item_removed()
-        self._do_type_changes()
-        # NOTE: the remove iterable action needs to happen BEFORE
-        # all the other iterables to match the reverse of order of operations in DeepDiff
-        self._do_iterable_opcodes()
-        self._do_iterable_item_removed()
-        self._do_iterable_item_added()
-        # self._do_values_changed()
-        # self._do_type_changes()
+
+        if self._iterable_compare_func_was_used:
+            # When iterable_compare_func is used, type/value-change paths are recorded
+            # in T2-space (post-insert indices). Partition them so that changes whose
+            # list-ancestor index is displaced by a pending insert are deferred until
+            # after the inserts have been applied.
+            insert_map = self._build_insert_map()
+            now_vc, defer_vc = self._partition_changes_by_insert_conflict(
+                self.diff.get('values_changed', {}), insert_map)
+            now_tc, defer_tc = self._partition_changes_by_insert_conflict(
+                self.diff.get('type_changes', {}), insert_map)
+            if now_vc:
+                self._do_values_or_type_changed(now_vc)
+            self._do_set_item_added()
+            self._do_set_item_removed()
+            if now_tc:
+                self._do_values_or_type_changed(now_tc, is_type_change=True)
+            self._do_iterable_opcodes()
+            self._do_iterable_item_removed()
+            self._do_iterable_item_added()
+            # List is now in T2-space; apply the deferred changes safely
+            if defer_vc:
+                self._do_values_or_type_changed(defer_vc)
+            if defer_tc:
+                self._do_values_or_type_changed(defer_tc, is_type_change=True)
+        else:
+            self._do_values_changed()
+            self._do_set_item_added()
+            self._do_set_item_removed()
+            self._do_type_changes()
+            # NOTE: the remove iterable action needs to happen BEFORE
+            # all the other iterables to match the reverse of order of operations in DeepDiff
+            self._do_iterable_opcodes()
+            self._do_iterable_item_removed()
+            self._do_iterable_item_added()
+
         self._do_ignore_order()
         self._do_dictionary_item_added()
         self._do_dictionary_item_removed()
@@ -409,6 +434,47 @@ class Delta:
         if iterable_item_moved:
             added_dict = {v["new_path"]: v["value"] for k, v in iterable_item_moved.items()}
             self._do_item_added(added_dict, insert=False)
+
+    def _build_insert_map(self):
+        """
+        Build a map of list-parent-path-tuple -> list of insertion indices
+        from the current diff's iterable_item_added entries.
+        E.g. {'root[0]': ..., 'root[1]': ...} -> {('root',): [0, 1]}
+        """
+        insert_map = {}
+        for path in self.diff.get('iterable_item_added', {}):
+            elems = _path_to_elements(path)
+            last_key, _ = elems[-1]
+            if not isinstance(last_key, int):
+                continue
+            parent_key = tuple(e[0] for e in elems[:-1])
+            insert_map.setdefault(parent_key, []).append(last_key)
+        return insert_map
+
+    def _is_insert_deferred(self, change_path, insert_map):
+        """
+        Return True if change_path contains a list-index segment whose parent
+        list has a pending insert at an index <= that segment's index.
+        """
+        elems = _path_to_elements(change_path)
+        for depth, (key, _) in enumerate(elems):
+            if isinstance(key, int):
+                parent_key = tuple(e[0] for e in elems[:depth])
+                if any(ins <= key for ins in insert_map.get(parent_key, [])):
+                    return True
+        return False
+
+    def _partition_changes_by_insert_conflict(self, changes, insert_map):
+        """
+        Split a changes dict into (apply_now, deferred).
+        Changes whose list-index ancestor has pending inserts at a lower-or-equal
+        index are deferred until after _do_iterable_item_added runs.
+        """
+        apply_now, deferred = {}, {}
+        for path, info in changes.items():
+            target = deferred if self._is_insert_deferred(path, insert_map) else apply_now
+            target[path] = info
+        return apply_now, deferred
 
     def _do_dictionary_item_added(self):
         dictionary_item_added = self.diff.get('dictionary_item_added')
