@@ -2747,7 +2747,20 @@ class TestDeltaCompareFunc:
         # just for the sake of delta, but not for reporting in deepdiff itself.
         # that way we can re-apply the changes as they were reported in delta.
 
+        # Values Changed: 
+        #  - D to X from index 3 to index 2
+        #. - G to Z at index 6
+        #. - F to Y at index 5
+        #  
+
+        # delta:  {'values_changed': {'root[3]': {'new_value': 'X', 'new_path': 'root[2]'}, 'root[6]': {'new_value': 'Z'}, 'root[5]': {'new_value': 'Y'}}, '_iterable_opcodes': {'root': [Opcode(tag='delete', t1_from_index=0, t1_to_index=1, t2_from_index=0, t2_to_index=0, new_values=[]), Opcode(tag='equal', t1_from_index=1, t1_to_index=3, t2_from_index=0, t2_to_index=2), Opcode(tag='replace', t1_from_index=3, t1_to_index=7, t2_from_index=2, t2_to_index=3, new_values=['X']), Opcode(tag='equal', t1_from_index=7, t1_to_index=9, t2_from_index=3, t2_to_index=5), Opcode(tag='insert', t1_from_index=9, t1_to_index=9, t2_from_index=5, t2_to_index=7, new_values=['Y', 'Z'])]}}
+        # l1 + delta ['B', 'C', 'X', 'X', 'H', 'Y', 'Z']
+        # l2 ['B', 'C', 'X', 'D', 'H', 'Y', 'Z']
+
         delta = Delta(diff)
+        print('delta: ', delta.to_dict())
+        print('l1 + delta', l1 + delta)
+        print('l2', l2)
         assert l2 == l1 + delta
         with pytest.raises(ValueError) as exc_info:
             l1 == l2 - delta
@@ -2932,3 +2945,65 @@ class TestDeltaCompareFunc:
         beforeImageAgain2 = allAfterImage - delta2
         diff4 = DeepDiff(beforeImage, beforeImageAgain2, ignore_order=True)
         assert not diff4
+
+    def test_moved_and_changed_flat(self):
+        """Items that both move (due to prepended inserts) and change values
+        should produce t2 with no phantom entries after delta replay."""
+        t1 = [{"id": "a", "val": 1}, {"id": "b", "val": 2},
+              {"id": "c", "val": 3}]
+        t2 = [
+            {"id": "new1", "val": 10},  # inserted at [0]
+            {"id": "new2", "val": 20},  # inserted at [1]
+            {"id": "a", "val": 0.5},    # moved [0]→[2], val changed
+            {"id": "b", "val": 1.0},    # moved [1]→[3], val changed
+            {"id": "c", "val": 1.5},    # moved [2]→[4], val changed
+        ]
+        ddiff = DeepDiff(t1, t2, iterable_compare_func=self.compare_func,
+                         threshold_to_diff_deeper=0)
+        result = t1 + Delta(ddiff, force=True, raise_errors=True,
+                            log_errors=False)
+        assert [item for item in result if "id" not in item] == [], \
+            "Phantom entries (dicts missing 'id') found in result"
+        assert result == t2
+
+    def test_moved_and_changed_nested(self):
+        """Same bug in a nested structure: inner list items that both move and
+        change values should produce no phantom entries after delta replay."""
+        t1 = {"rows": [
+            {"id": "r1", "items": [{"id": "a", "val": 1},
+                                   {"id": "b", "val": 2}]},
+            ]}
+        t2 = {"rows": [
+            {"id": "r1", "items": [
+                {"id": "new1", "val": 99},  # inserted at [0]
+                {"id": "a", "val": 0.5},    # moved [0]→[1], val changed
+                {"id": "b", "val": 1.0},    # moved [1]→[2], val changed
+            ]},
+        ]}
+        ddiff = DeepDiff(t1, t2, iterable_compare_func=self.compare_func,
+                         threshold_to_diff_deeper=0)
+        result = t1 + Delta(ddiff, force=True, raise_errors=True,
+                            log_errors=False)
+        assert [item for item in result["rows"][0][
+            "items"] if "id" not in item] == [], \
+            "Phantom entries (dicts missing 'id') found in nested result"
+        assert result == t2
+
+    def test_appended_only_no_movement_sanity_check(self):
+        """
+        When new items are only appended (existing items keep their positions),
+        stock Delta produces the correct result with no phantom entries.
+        """
+        t1 = [{"id": "a", "val": 1}, {"id": "b", "val": 2}]
+        t2 = [
+            {"id": "a", "val": 0.5},    # stays at [0], val changed
+            {"id": "b", "val": 1.0},    # stays at [1], val changed
+            {"id": "new1", "val": 10},  # appended
+            {"id": "new2", "val": 20},  # appended
+        ]
+        ddiff = DeepDiff(t1, t2, iterable_compare_func=self.compare_func,
+                         threshold_to_diff_deeper=0)
+        result = t1 + Delta(ddiff, force=True, raise_errors=True,
+                            log_errors=False)
+        assert [item for item in result if "id" not in item] == []
+        assert result == t2

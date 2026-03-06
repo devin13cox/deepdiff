@@ -1,5 +1,6 @@
 import copy
 import logging
+import re
 from typing import List, Dict, IO, Callable, Set, Union, Optional, Any
 from functools import partial, cmp_to_key
 from collections.abc import Mapping
@@ -487,14 +488,49 @@ class Delta:
             self._set_new_value(parent, parent_to_obj_elem, parent_to_obj_action,
                                 obj, elements, path, elem, action, new_value)
 
+    def _filter_changes_covered_by_opcodes_or_moved(self, changes):
+        """Return a filtered copy of *changes*, dropping entries that are
+        already fully handled by either ``_iterable_opcodes`` or
+        ``iterable_item_moved``.
+
+        * ``_iterable_opcodes``: the replace opcode already encodes the correct
+          new value; applying the change again would operate on stale t1 indices.
+        * ``iterable_item_moved``: the moved entry already carries the complete
+          new value; the sub-field change path uses a t2 index that does not
+          exist yet when the change is applied (before items are inserted).
+        """
+        _iterable_opcodes = self.diff.get('_iterable_opcodes', {})
+        iterable_item_moved = self.diff.get('iterable_item_moved', {})
+        if not _iterable_opcodes and not iterable_item_moved:
+            return changes
+        filtered = {}
+        for path, value in changes.items():
+            # Check _iterable_opcodes: skip if direct parent list is handled.
+            if _iterable_opcodes:
+                parent_path = re.sub(r'\[\d+\]$', '', path)
+                if parent_path in _iterable_opcodes:
+                    continue
+            # Check iterable_item_moved: skip if the sub-field belongs to a
+            # moved item (new_path gives the t1 path; its parent is the item).
+            if iterable_item_moved:
+                new_path = value.get('new_path', '')
+                if new_path:
+                    item_path = re.sub(r'(\[[^\]]*\]|\.\w+)$', '', new_path)
+                    if item_path in iterable_item_moved:
+                        continue
+            filtered[path] = value
+        return filtered
+
     def _do_values_changed(self):
         values_changed = self.diff.get('values_changed')
         if values_changed:
+            values_changed = self._filter_changes_covered_by_opcodes_or_moved(values_changed)
             self._do_values_or_type_changed(values_changed)
 
     def _do_type_changes(self):
         type_changes = self.diff.get('type_changes')
         if type_changes:
+            type_changes = self._filter_changes_covered_by_opcodes_or_moved(type_changes)
             self._do_values_or_type_changed(type_changes, is_type_change=True)
 
     def _do_post_process(self):
